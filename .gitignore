@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test/typing/cache dirs
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.dmypy.json
+
+# Virtual envs (optional)
+.venv/
+venv/
