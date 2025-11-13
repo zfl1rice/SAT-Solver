@@ -1,0 +1,33 @@
+Supposedly, Albert Einstein wrote this riddle, and said 98% of the people could not solve it.
+There are five houses in five different colors. In each house lives a man with a different
+nationality. The five owners drink a certain type of beverage, smoke a certain brand of cigar,
+and keep a certain pet. No owners have the same pet, smoke the same brand of cigar or drink
+the same beverage. The question is: “Who owns the fish?”
+Hints:
+• The Brit lives in the red house.
+• The Swede keeps dogs as pets.
+• The Dane drinks tea.
+• The green house is on the left of the white house.
+• The green house’s owner drinks coffee.
+• The person who smokes Pall Mall rears birds.
+• The owner of the yellow house smokes Dunhill.
+• The man living in the center house drinks milk.
+• The Norwegian lives in the first house.
+• The man who smokes Blends lives next to the one who keeps cats.
+• The man who keeps the horse lives next to the man who smokes Dunhill.
+• The owner who smokes Bluemasters drinks beer.
+• The German smokes Prince.
+• The Norwegian lives next to the blue house.
+• The man who smokes Blends has a neighbor who drinks water.
+In order to solve the puzzle, you have to make some assumptions:
+1. The owner is the resident of each house.
+2. One of the residents owns the fish.
+3. The term neighbor in the last hint refers only to a directly adjacent neighbor.
+4. The houses are on the same side of the street.
+5. They are next to each other, and are ordered from left to right as you face them rather
+than standing in front of a house facing the street (i.e. facing the same direction as the
+house).
+You need to solve this puzzle by expressing it first as a CNF formula such that the satisfying
+assignment of the formula correspond to possible solutions of the puzzle.
+Interim Report: Your interim report should include your encoding of the problem as a CNF
+formula and your solution of the puzzle.
