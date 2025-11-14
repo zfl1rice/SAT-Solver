@@ -19,27 +19,63 @@ class CNF:
       - Spaces are ignored; characters '∧', '∨', '(', and ' ' are treated as separators.
       - Negation '¬' applies only to the next single-character variable.
     """
-
-    def __init__(self, CNFString: str):
+    def __init__(self, dimacsFile: str):
         """
-        Initialize the CNF object and immediately parse the input string.
+        Initialize the CNF object from a DIMACS CNF file.
 
         Args:
-            CNFString (str): The CNF formula as a string using Unicode symbols
-                (e.g., "(p ∨ q) ∧ (¬p ∨ r)").
+            dimacsFile (str): Path to a DIMACS CNF file. The file should
+                follow the standard format:
+                    c ...         (comments)
+                    p cnf N M     (problem line: N vars, M clauses)
+                    <lits> 0      (clauses, literals as ints ending with 0)
 
         Attributes:
-            CNFString (str): Stores the original CNF string.
             CNFList (list[list[str]]): Parsed CNF as a list of clauses, where each
-                clause is a list of literal strings (e.g., "p", "¬p").
+                clause is a list of literal strings; positive literals are like
+                "3", negative literals are like "¬3".
+            numVars (int): Number of variables declared in the header.
+            numClauses (int): Number of clauses declared in the header.
 
-        Side Effects:
-            Populates self.CNFList by calling convertToList().
+        Notes:
+            - This assumes each clause is contained on a single line.
+            - It ignores comment lines starting with 'c'.
         """
-        self.CNFString = CNFString
         self.CNFList = []
+        self.numVars = 0
+        self.numClauses = 0
 
-        self.convertToList()
+        with open(dimacsFile, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue  # skip empty lines
+
+                if line.startswith('c'):
+                    continue  # comment
+
+                if line.startswith('p'):
+                    # Example: "p cnf 5 10"
+                    header = line.split()
+                    # header[0] = 'p', header[1] = 'cnf', header[2] = numVars, header[3] = numClauses
+                    self.numVars = int(header[2])
+                    self.numClauses = int(header[3])
+                    continue
+
+                # Clause line
+                tokens = line.split()
+                temp = []
+                for tok in tokens:
+                    if tok == '0':
+                        break  # end of this clause
+                    if tok.startswith('-'):
+                        temp.append("¬" + tok[1:])
+                    else:
+                        temp.append(tok)
+                if temp:
+                    self.CNFList.append(temp)
+
+
 
     def getCNFString(self) -> str:
         """
