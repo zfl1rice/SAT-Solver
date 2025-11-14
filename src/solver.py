@@ -15,7 +15,13 @@ def main():
 
     solver = DPLL("input.txt")
     is_sat = solver.solve()
-    print("Result:", "SAT" if is_sat else "UNSAT")
+    model = solver.solve()
+    if model is None:
+        print("UNSAT")
+    else:
+        print("SAT with assignment:")
+        for var, val in sorted(model.items(), key=lambda x: int(x[0])):
+            print(f"{var} = {val}")
             
 if __name__ == "__main__":
     main()

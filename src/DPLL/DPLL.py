@@ -18,6 +18,7 @@ class DPLL:
         self.varFreqs = Counter()   # var -> count
         self._heap = []             # max-heap via (-freq, var)
         self.assigned = set()       # vars that have been set True/False
+        self.assignments = {}
 
         # Initialize varFreqs and heap from the starting CNF
         for clause in self.getCNFList():
@@ -103,6 +104,7 @@ class DPLL:
                 True otherwise (keep going).
         """
         self.assigned.add(prop)
+        self.assignments[prop] = value
         curr = self.getCNFList()
 
         full_prop = prop if value else f'¬{prop}'
@@ -170,7 +172,7 @@ class DPLL:
             sat = self.simplify(var, val)
             if not sat:
                 # simplify already found UNSAT
-                return False
+                return None
 
         # --- Pure literal elimination ---
         for pure in self.pures:
@@ -183,14 +185,14 @@ class DPLL:
 
             sat = self.simplify(var, val)
             if not sat:
-                return False
+                return None
 
         # --- Check SAT/UNSAT at this node ---
         status = self.checkSat()
         if status is True:
-            return True
+            return dict(self.assignments)
         elif status is False:
-            return False
+            return None
         # else: unknown, need to branch
 
         # --- Choose branching variable ---
@@ -204,51 +206,17 @@ class DPLL:
         # --- Branch: next_var = True ---
         left = deepcopy(self)
         if left.simplify(next_var, True):
-            if left._solve_from_state():
-                return True
+            model = left._solve_from_state()
+            if model is not None:
+                return model
 
         # --- Branch: next_var = False ---
         right = deepcopy(self)
         if right.simplify(next_var, False):
-            if right._solve_from_state():
-                return True
+            model = right._solve_from_state()
+            if model is not None:
+                return model
 
         # Both branches failed => UNSAT under current path
-        return False
+        return None
 
-    
-
-def main():
-    cnf_str = "(p ∨ q) ∧ (¬p ∨ r)"
-    solver = DPLL(cnf_str)
-    is_sat = solver.solve()
-    print("Result:", "SAT" if is_sat else "UNSAT")
-    
-            
-if __name__ == "__main__":
-    main()
-
-
-
-"""
-DPLL(F):
-  F := simplify(F)            // remove satisfied clauses, delete false literals
-  if F has an empty clause: return UNSAT
-  if F has no clauses: return SAT
-
-  // Unit propagation
-  while F has a unit clause (ℓ):
-    assign(ℓ); F := simplify(F)
-    if F has an empty clause: return UNSAT
-
-  // Pure literal elimination
-  for each variable v that is pure in F:
-    assign(pure literal of v); F := simplify(F)
-
-  if F has no clauses: return SAT
-  if all vars assigned: return SAT
-
-  // Branch
-  x := choose_unassigned_variable(F)
-  return DPLL(F ∧ x) OR DPLL(F ∧ ¬x)
-"""
