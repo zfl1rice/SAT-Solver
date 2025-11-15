@@ -13,7 +13,7 @@ from src.DPLL.DPLL import DPLL
 
 def main():
 
-    solver = DPLL("input.txt")
+    solver = DPLL("puzzle.txt")
     is_sat = solver.solve()
     model = solver.solve()
     if model is None:
