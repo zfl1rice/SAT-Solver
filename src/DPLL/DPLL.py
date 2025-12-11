@@ -1,222 +1,251 @@
+import time
 from ..CNF.CNF import CNF
-from collections import Counter
-import heapq
-from copy import deepcopy
+
 
 class DPLL:
-    def __init__(self, dimacsFile):
-        """
-        Initialize a DPLL instance from a DIMACS CNF file.
+    """
+    Simple DPLL solver using:
+      - immutable CNF with integer literals
+      - assignment array: var -> True/False/None
+      - a trail for backtracking
+      - plain unit propagation (no watched literals yet)
 
-        Args:
-            dimacs_path (str): Path to a DIMACS file.
-        """
-        self.cnf = CNF(dimacsFile)
+    Instrumentation:
+      - self.split_count: number of splitting rule applications
+      - self.solve_time: total wall-clock time (seconds) for last solve()
+    """
 
-        self.unitClauses = []
+    def __init__(self, dimacs_file: str):
+        # Load CNF
+        self.cnf = CNF(dimacs_file)
+        self.clauses = self.cnf.getCNFList()
+        self.num_vars = self.cnf.numVars
 
-        self.varFreqs = Counter()   # var -> count
-        self._heap = []             # max-heap via (-freq, var)
-        self.assigned = set()       # vars that have been set True/False
-        self.assignments = {}
+        # assignment[var] in {True, False, None}; index 0 unused
+        self.assignment = [None] * (self.num_vars + 1)
+        # trail of (var, value) in order of assignment
+        self.trail = []
 
-        # Initialize varFreqs and heap from the starting CNF
-        for clause in self.getCNFList():
+        # Optional: static variable frequency heuristic
+        self.var_freq = [0] * (self.num_vars + 1)
+        for clause in self.clauses:
             for lit in clause:
-                var = lit[1:] if lit.startswith("¬") else lit
-                self._inc_var_freq(var)
-            if len(clause) == 1:
-                self.unitClauses.append(clause)
+                self.var_freq[abs(lit)] += 1
 
-        pos = set()
-        neg = set()
-        for clause in self.getCNFList():
-            for lit in clause:
-                if lit.startswith("¬"):
-                    neg.add(lit[1:])
-                else:
-                    pos.add(lit)
+        # --- Instrumentation fields ---
+        self.split_count = 0   # number of times we branch on a variable
+        self.solve_time = 0.0  # wall-clock time of last solve()
 
-        self.pures = []
-        for v in pos ^ neg:  # variables that appear in exactly one of pos/neg
-            # add the actual literal, not the var name:
-            if v in pos and v not in neg:
-                self.pures.append(v)        # pure positive
-            elif v in neg and v not in pos:
-                self.pures.append("¬" + v)  # pure negative
+    # --------- Low-level assignment & undo ---------
 
-
-    def _inc_var_freq(self, var, amount=1):
-        """Increase frequency of var and push updated entry into heap."""
-        self.varFreqs[var] += amount
-        heapq.heappush(self._heap, (-self.varFreqs[var], var))
-
-    def _dec_var_freq(self, var, amount=1):
-        """Decrease frequency of var and push updated entry into heap."""
-        self.varFreqs[var] -= amount
-        if self.varFreqs[var] < 0:
-            self.varFreqs[var] = 0
-        # Push new (freq, var); old entries become 'stale' and will be skipped.
-        heapq.heappush(self._heap, (-self.varFreqs[var], var))
-
-    def choose_most_frequent_var(self):
+    def assign_literal(self, lit: int) -> bool:
         """
-        Return the currently most frequent unassigned variable using a max-heap.
-
-        Uses lazy updates: the heap may contain stale entries, which are
-        skipped until we find one whose frequency matches varFreqs[var]
-        and is not already assigned.
-
-        Returns:
-            str | None: variable name like "p", or None if no candidate exists.
+        Assign a literal. Returns False if this creates a conflict
+        with an existing assignment, True otherwise.
         """
-        while self._heap:
-            neg_freq, var = heapq.heappop(self._heap)
-            current_freq = self.varFreqs.get(var, 0)
+        var = abs(lit)
+        val = (lit > 0)  # True if positive literal, False if negative
 
-            # Skip stale entries or vars with freq 0 or already assigned
-            if current_freq == 0 or var in self.assigned or -neg_freq != current_freq:
-                continue
-
-            return var
-
-        return None  # no unassigned vars left
-
-    def getCNFList(self):
-        return self.cnf.getCNFList()
-    
-    def checkSat(self):
-        cnf_list = self.getCNFList()
-
-        if not cnf_list:
-            return True  # SAT
-
-        for clause in cnf_list:
-            if not clause:
-                return False  # UNSAT
-
-        return None
-    
-    def simplify(self, prop, value):
-        """
-        Returns:
-            bool: False if UNSAT was detected (empty clause),
-                True otherwise (keep going).
-        """
-        self.assigned.add(prop)
-        self.assignments[prop] = value
-        curr = self.getCNFList()
-
-        full_prop = prop if value else f'¬{prop}'
-        opp = f'¬{prop}' if value else prop
-
-        new = []
-        for clause in curr:
-            if full_prop in clause:
-                for lit in clause:
-                    var = lit[1:] if lit.startswith("¬") else lit
-                    self._dec_var_freq(var, 1)
-                continue
-
-            reduced = []
-            for lit in clause:
-                if lit == opp:
-                    var = lit[1:] if lit.startswith("¬") else lit
-                    self._dec_var_freq(var, 1)
-                else:
-                    reduced.append(lit)
-
-            if not reduced:
+        current = self.assignment[var]
+        if current is not None:
+            # If already assigned differently -> conflict
+            if current != val:
                 return False
-
-            if len(reduced) == 1:
-                self.unitClauses.append(reduced)
-
-            new.append(reduced)
-
-        # Don't detect SAT here; just update CNF
-        self.cnf.setCNFList(new)
-        return True
-    
-    def solve(self):
-        """
-        Run the DPLL algorithm on this CNF instance.
-
-        Returns:
-            bool: True if the formula is satisfiable, False otherwise.
-        """
-        return self._solve_from_state()
-
-    # ---------- Core recursive DPLL ----------
-
-    def _solve_from_state(self):
-        """
-        Recursive DPLL solver working on the current internal state.
-
-        Returns:
-            bool: True if SAT from this state, False if UNSAT.
-        """
-
-        # --- Unit propagation ---
-        u = self.unitClauses
-        while u:
-            curr_lit = u.pop()[0]   # ["p"] or ["¬p"] -> "p"/"¬p"
-
-            if curr_lit.startswith("¬"):
-                var = curr_lit[1:]
-                val = False
-            else:
-                var = curr_lit
-                val = True
-
-            sat = self.simplify(var, val)
-            if not sat:
-                # simplify already found UNSAT
-                return None
-
-        # --- Pure literal elimination ---
-        for pure in self.pures:
-            if pure.startswith("¬"):
-                var = pure[1:]
-                val = False
-            else:
-                var = pure
-                val = True
-
-            sat = self.simplify(var, val)
-            if not sat:
-                return None
-
-        # --- Check SAT/UNSAT at this node ---
-        status = self.checkSat()
-        if status is True:
-            return dict(self.assignments)
-        elif status is False:
-            return None
-        # else: unknown, need to branch
-
-        # --- Choose branching variable ---
-        next_var = self.choose_most_frequent_var()
-
-        if next_var is None:
-            # No variables left; if we got here, be defensive and say SAT
-            print("SAT")
             return True
 
-        # --- Branch: next_var = True ---
-        left = deepcopy(self)
-        if left.simplify(next_var, True):
-            model = left._solve_from_state()
+        # New assignment
+        self.assignment[var] = val
+        self.trail.append((var, val))
+        return True
+
+    def undo_to(self, trail_len: int) -> None:
+        """
+        Undo assignments back to a given trail length.
+        """
+        while len(self.trail) > trail_len:
+            var, _ = self.trail.pop()
+            self.assignment[var] = None
+
+    # --------- Propagation & status checking ---------
+
+    def propagate(self) -> bool:
+        """
+        Perform unit propagation under the current assignment.
+
+        Returns:
+            True  if no conflict.
+            False if a clause becomes unsatisfiable (all literals false).
+        """
+        changed = True
+        while changed:
+            changed = False
+
+            for clause in self.clauses:
+                clause_value = False      # has any literal True?
+                unassigned_lits = []      # collect unassigned literals
+
+                for lit in clause:
+                    var = abs(lit)
+                    val = self.assignment[var]
+
+                    if val is None:
+                        unassigned_lits.append(lit)
+                    else:
+                        # literal value under assignment
+                        if (lit > 0 and val) or (lit < 0 and not val):
+                            clause_value = True
+                            break
+
+                if clause_value:
+                    # clause already satisfied
+                    continue
+
+                if not unassigned_lits:
+                    # no literal is True and no unassigned: all False -> conflict
+                    return False
+
+                if len(unassigned_lits) == 1:
+                    # unit clause: force that literal
+                    unit_lit = unassigned_lits[0]
+                    if not self.assign_literal(unit_lit):
+                        return False
+                    changed = True
+
+        return True
+
+    def check_status(self):
+        """
+        Check if the formula is already SAT, UNSAT, or unknown
+        under the current assignment.
+
+        Returns:
+            True   if all clauses are satisfied (SAT).
+            False  if any clause is unsatisfiable (UNSAT).
+            None   if still undecided.
+        """
+        any_undecided = False
+
+        for clause in self.clauses:
+            clause_value = False
+            clause_undecided = False
+
+            for lit in clause:
+                var = abs(lit)
+                val = self.assignment[var]
+
+                if val is None:
+                    clause_undecided = True
+                else:
+                    if (lit > 0 and val) or (lit < 0 and not val):
+                        clause_value = True
+                        break
+
+            if clause_value:
+                continue
+
+            if not clause_undecided:
+                # all assigned and clause not satisfied -> UNSAT
+                return False
+
+            any_undecided = True
+
+        if any_undecided:
+            return None
+        else:
+            return True
+
+    # --------- Branching heuristic ---------
+
+    def choose_var(self) -> int | None:
+        """
+        Choose the next unassigned variable to branch on.
+        Uses a simple 'most frequent' heuristic.
+        """
+        best_var = None
+        best_score = -1
+
+        for v in range(1, self.num_vars + 1):
+            if self.assignment[v] is None:
+                score = self.var_freq[v]
+                if score > best_score:
+                    best_score = score
+                    best_var = v
+
+        return best_var
+
+    # --------- Public API ---------
+
+    def solve(self):
+        """
+        Solve the CNF via DPLL.
+
+        Returns:
+            dict[int, bool] | None:
+                - dict mapping var -> bool if SAT,
+                - None if UNSAT.
+
+        Side effects:
+            - Updates self.split_count with the number of branching decisions.
+            - Updates self.solve_time with elapsed wall-clock time (seconds).
+        """
+        # reset instrumentation for this run
+        self.split_count = 0
+        self.solve_time = 0.0
+
+        start = time.perf_counter()
+
+        # initial propagation
+        if not self.propagate():
+            self.solve_time = time.perf_counter() - start
+            return None  # immediate conflict
+
+        model = self._solve_rec()
+
+        self.solve_time = time.perf_counter() - start
+        return model
+
+    # --------- Core recursive DPLL ---------
+
+    def _solve_rec(self):
+        """
+        Recursive DPLL on current state.
+
+        Returns:
+            dict[int, bool] | None:
+                - model if SAT
+                - None if UNSAT
+        """
+        status = self.check_status()
+        if status is True:
+            # build and return model
+            return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
+        elif status is False:
+            return None
+
+        # Need to branch
+        var = self.choose_var()
+        if var is None:
+            # No variable left unassigned; treat as SAT with current assignment
+            return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
+
+        # --- splitting rule applied here ---
+        self.split_count += 1
+
+        # Try var = True
+        mark = len(self.trail)
+        if self.assign_literal(+var) and self.propagate():
+            model = self._solve_rec()
             if model is not None:
                 return model
+        self.undo_to(mark)
 
-        # --- Branch: next_var = False ---
-        right = deepcopy(self)
-        if right.simplify(next_var, False):
-            model = right._solve_from_state()
+        # Try var = False
+        mark = len(self.trail)
+        if self.assign_literal(-var) and self.propagate():
+            model = self._solve_rec()
             if model is not None:
                 return model
+        self.undo_to(mark)
 
-        # Both branches failed => UNSAT under current path
+        # Both branches UNSAT
         return None
-
