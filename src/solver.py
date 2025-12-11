@@ -1,33 +1,29 @@
+from src.fixedModel.FixedLength3Sat import FixedLength3SAT
+from src.DPLL.DPLL import DPLL
 import statistics as stats
 import matplotlib.pyplot as plt
 
-from src.fixedModel.FixedLength3Sat import FixedLength3SAT  # adjust path if needed
-from src.DPLL.DPLL import DPLL
-
 
 def run_experiment():
-    N_vals = [150, 250]
+    N_vals = [100, 250]
     ratios = [i / 10 for i in range(30, 62, 2)]  # 3.0, 3.2, ..., 6.0
     num_trials = 100
 
-    # store results as: results[N][ratio] = dict(...)
     results = {N: {} for N in N_vals}
 
     for N in N_vals:
         for r in ratios:
-            L = int(N * r)  # make sure it's an integer
+            L = int(N * r)
 
             compute_times = []
             num_splits = []
-            failures = 0  # UNSAT count (or however you define "failure")
+            failures = 0  # UNSAT count (or however you want to define it)
 
             for _ in range(num_trials):
-                # generate random 3-SAT instance
                 generator = FixedLength3SAT(L=L, N=N)
-                generator.write_dimacs("random_3sat.cnf")
+                clauses = generator.getCNFList()
 
-                # solve
-                solver = DPLL("random_3sat.cnf")
+                solver = DPLL(clauses=clauses, num_vars=N)
                 model = solver.solve()
 
                 num_splits.append(solver.split_count)
@@ -38,7 +34,6 @@ def run_experiment():
 
             successes = num_trials - failures
             success_rate = successes / num_trials
-
             median_time = stats.median(compute_times)
             median_splits = stats.median(num_splits)
 
@@ -61,24 +56,24 @@ def run_experiment():
 def plot_results(results, ratios):
     N_vals = sorted(results.keys())
 
-    # --- 1) Median runtime vs ratio ---
+    # Median runtime
     plt.figure()
     for N in N_vals:
         y = [results[N][r]["median_time"] for r in ratios]
         plt.plot(ratios, y, marker="o", label=f"N={N}")
-    plt.xlabel("Clause/Variable ratio (L/N)")
+    plt.xlabel("L/N")
     plt.ylabel("Median runtime (s)")
     plt.title("Median runtime vs clause/variable ratio")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
 
-    # --- 2) Success rate vs ratio ---
+    # Success rate
     plt.figure()
     for N in N_vals:
         y = [results[N][r]["success_rate"] for r in ratios]
         plt.plot(ratios, y, marker="o", label=f"N={N}")
-    plt.xlabel("Clause/Variable ratio (L/N)")
+    plt.xlabel("L/N")
     plt.ylabel("Success rate (SAT fraction)")
     plt.title("Success rate vs clause/variable ratio")
     plt.legend()
@@ -86,19 +81,20 @@ def plot_results(results, ratios):
     plt.grid(True)
     plt.tight_layout()
 
-    # --- 3) Median splits vs ratio ---
+    # Median splits
     plt.figure()
     for N in N_vals:
         y = [results[N][r]["median_splits"] for r in ratios]
         plt.plot(ratios, y, marker="o", label=f"N={N}")
-    plt.xlabel("Clause/Variable ratio (L/N)")
-    plt.ylabel("Median number of splits")
+    plt.xlabel("L/N")
+    plt.ylabel("Median #splits")
     plt.title("Median splitting rule applications vs ratio")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
 
     plt.show()
+
 
 
 def main():

@@ -1,59 +1,103 @@
+# src/DPLL/DPLL.py
 import time
+from collections import defaultdict, deque
 from ..CNF.CNF import CNF
 
 
 class DPLL:
     """
-    Simple DPLL solver using:
-      - immutable CNF with integer literals
-      - assignment array: var -> True/False/None
-      - a trail for backtracking
-      - plain unit propagation (no watched literals yet)
+    DPLL with:
+      - immutable CNF (integer literals)
+      - assignment + trail for backtracking
+      - watched literals for efficient unit propagation
+      - instrumentation: split_count, solve_time
 
-    Instrumentation:
-      - self.split_count: number of splitting rule applications
-      - self.solve_time: total wall-clock time (seconds) for last solve()
+    You can build it from:
+      - a DIMACS file: DPLL(dimacs_file="foo.cnf")
+      - in-memory CNF: DPLL(clauses=..., num_vars=N)
     """
 
-    def __init__(self, dimacs_file: str):
-        # Load CNF
-        self.cnf = CNF(dimacs_file)
-        self.clauses = self.cnf.getCNFList()
-        self.num_vars = self.cnf.numVars
+    def __init__(self,
+                 dimacs_file: str | None = None,
+                 clauses: list[list[int]] | None = None,
+                 num_vars: int | None = None):
+
+        if dimacs_file is None and clauses is None:
+            raise ValueError("Provide either dimacs_file or clauses.")
+        if dimacs_file is not None and clauses is not None:
+            raise ValueError("Provide only one of dimacs_file or clauses, not both.")
+
+        if clauses is not None:
+            # in-memory mode
+            self.clauses = clauses
+            if num_vars is not None:
+                self.num_vars = num_vars
+            else:
+                self.num_vars = max(abs(l) for c in clauses for l in c)
+        else:
+            # file-based mode
+            base = CNF(dimacs_file)
+            self.clauses = base.getCNFList()
+            self.num_vars = base.numVars
 
         # assignment[var] in {True, False, None}; index 0 unused
         self.assignment = [None] * (self.num_vars + 1)
-        # trail of (var, value) in order of assignment
-        self.trail = []
+        # trail of (var, value)
+        self.trail: list[tuple[int, bool]] = []
 
-        # Optional: static variable frequency heuristic
+        # simple static frequency heuristic
         self.var_freq = [0] * (self.num_vars + 1)
         for clause in self.clauses:
             for lit in clause:
                 self.var_freq[abs(lit)] += 1
 
-        # --- Instrumentation fields ---
-        self.split_count = 0   # number of times we branch on a variable
-        self.solve_time = 0.0  # wall-clock time of last solve()
+        # watched-literal structures
+        self.watch_pos: list[tuple[int, int]] = []
+        self.watchlist: dict[int, list[int]] = defaultdict(list)
+        self._init_watches()
 
-    # --------- Low-level assignment & undo ---------
+        # pointer into trail for propagation
+        self.last_propagated = 0
+
+        # instrumentation
+        self.split_count = 0
+        self.solve_time = 0.0
+
+    # ---------- watched-literal initialization ----------
+
+    def _init_watches(self) -> None:
+        """
+        For each clause, choose two watched literals and
+        populate watch_pos and watchlist.
+        """
+        for ci, clause in enumerate(self.clauses):
+            if len(clause) == 0:
+                self.watch_pos.append((0, 0))
+                continue
+            elif len(clause) == 1:
+                self.watch_pos.append((0, 0))
+                lit = clause[0]
+                self.watchlist[lit].append(ci)
+            else:
+                self.watch_pos.append((0, 1))
+                lit1, lit2 = clause[0], clause[1]
+                self.watchlist[lit1].append(ci)
+                self.watchlist[lit2].append(ci)
+
+    # ---------- assignment & backtracking ----------
 
     def assign_literal(self, lit: int) -> bool:
         """
-        Assign a literal. Returns False if this creates a conflict
-        with an existing assignment, True otherwise.
+        Assign a literal. Returns False if this conflicts with an existing assignment,
+        True otherwise.
         """
         var = abs(lit)
-        val = (lit > 0)  # True if positive literal, False if negative
+        val = lit > 0  # True if positive, False if negative
 
         current = self.assignment[var]
         if current is not None:
-            # If already assigned differently -> conflict
-            if current != val:
-                return False
-            return True
+            return current == val
 
-        # New assignment
         self.assignment[var] = val
         self.trail.append((var, val))
         return True
@@ -66,62 +110,105 @@ class DPLL:
             var, _ = self.trail.pop()
             self.assignment[var] = None
 
-    # --------- Propagation & status checking ---------
+        if self.last_propagated > trail_len:
+            self.last_propagated = trail_len
+
+    # ---------- watched-literal propagation ----------
 
     def propagate(self) -> bool:
         """
-        Perform unit propagation under the current assignment.
+        Perform unit propagation using watched literals.
 
         Returns:
             True  if no conflict.
-            False if a clause becomes unsatisfiable (all literals false).
+            False if a conflict (empty clause) is found.
         """
-        changed = True
-        while changed:
-            changed = False
+        queue = deque()
 
-            for clause in self.clauses:
-                clause_value = False      # has any literal True?
-                unassigned_lits = []      # collect unassigned literals
+        # New assignments since last propagation
+        for idx in range(self.last_propagated, len(self.trail)):
+            var, val = self.trail[idx]
+            false_lit = -var if val else var
+            queue.append(false_lit)
 
-                for lit in clause:
-                    var = abs(lit)
-                    val = self.assignment[var]
+        self.last_propagated = len(self.trail)
 
-                    if val is None:
-                        unassigned_lits.append(lit)
-                    else:
-                        # literal value under assignment
-                        if (lit > 0 and val) or (lit < 0 and not val):
-                            clause_value = True
-                            break
+        while queue:
+            false_lit = queue.popleft()
+            clauses_watching = self.watchlist.get(false_lit)
+            if not clauses_watching:
+                continue
 
-                if clause_value:
-                    # clause already satisfied
+            # iterate over a snapshot because we'll mutate the list
+            for ci in clauses_watching[:]:
+                clause = self.clauses[ci]
+                w1_idx, w2_idx = self.watch_pos[ci]
+                w1_lit = clause[w1_idx]
+                w2_lit = clause[w2_idx]
+
+                # Identify which watch is actually false_lit (could be stale)
+                if w1_lit == false_lit:
+                    false_idx, other_idx = w1_idx, w2_idx
+                    other_lit = w2_lit
+                elif w2_lit == false_lit:
+                    false_idx, other_idx = w2_idx, w1_idx
+                    other_lit = w1_lit
+                else:
+                    # clause no longer actually watches false_lit
                     continue
 
-                if not unassigned_lits:
-                    # no literal is True and no unassigned: all False -> conflict
-                    return False
+                # Try to find a replacement literal to watch that is not known-false
+                found_replacement = False
+                for k, L in enumerate(clause):
+                    if k == w1_idx or k == w2_idx:
+                        continue
+                    var = abs(L)
+                    val = self.assignment[var]
+                    is_false = (val is not None) and (
+                        (L > 0 and not val) or (L < 0 and val)
+                    )
+                    if not is_false:
+                        # move watch from false_lit to L
+                        if false_idx == w1_idx:
+                            self.watch_pos[ci] = (k, other_idx)
+                        else:
+                            self.watch_pos[ci] = (other_idx, k)
 
-                if len(unassigned_lits) == 1:
-                    # unit clause: force that literal
-                    unit_lit = unassigned_lits[0]
-                    if not self.assign_literal(unit_lit):
+                        self.watchlist[false_lit].remove(ci)
+                        self.watchlist[L].append(ci)
+
+                        found_replacement = True
+                        break
+
+                if found_replacement:
+                    continue
+
+                # No replacement found: other_lit is only candidate
+                var = abs(other_lit)
+                val = self.assignment[var]
+
+                if val is not None:
+                    is_false = (other_lit > 0 and not val) or (other_lit < 0 and val)
+                    if is_false:
+                        # both watched literals false: conflict
                         return False
-                    changed = True
+                    else:
+                        # clause is satisfied by other_lit
+                        continue
+                else:
+                    # Unit clause: force other_lit to True
+                    if not self.assign_literal(other_lit):
+                        return False
+                    false2 = -var if other_lit > 0 else var
+                    queue.append(false2)
 
         return True
 
+    # ---------- status & branching ----------
+
     def check_status(self):
         """
-        Check if the formula is already SAT, UNSAT, or unknown
-        under the current assignment.
-
-        Returns:
-            True   if all clauses are satisfied (SAT).
-            False  if any clause is unsatisfiable (UNSAT).
-            None   if still undecided.
+        Check if the formula is SAT, UNSAT, or unknown.
         """
         any_undecided = False
 
@@ -144,8 +231,7 @@ class DPLL:
                 continue
 
             if not clause_undecided:
-                # all assigned and clause not satisfied -> UNSAT
-                return False
+                return False  # UNSAT
 
             any_undecided = True
 
@@ -154,26 +240,58 @@ class DPLL:
         else:
             return True
 
-    # --------- Branching heuristic ---------
-
-    def choose_var(self) -> int | None:
+    def choose_branch_literal(self) -> int | None:
         """
-        Choose the next unassigned variable to branch on.
-        Uses a simple 'most frequent' heuristic.
+        DSJ heuristic:
+        For each *literal* ℓ, compute:
+
+            score(ℓ) = sum_{ℓ in C, C unsatisfied} 1 / 2^{|C|}
+
+        over clauses C that are not yet satisfied and where ℓ's variable is unassigned.
+        Return the literal with the highest score, or None if no candidate.
         """
-        best_var = None
-        best_score = -1
+        scores = defaultdict(float)
+        assignment = self.assignment
 
-        for v in range(1, self.num_vars + 1):
-            if self.assignment[v] is None:
-                score = self.var_freq[v]
-                if score > best_score:
-                    best_score = score
-                    best_var = v
+        for clause in self.clauses:
+            # Check if clause is already satisfied or completely dead
+            clause_satisfied = False
+            clause_has_unassigned = False
 
-        return best_var
+            for lit in clause:
+                var = abs(lit)
+                val = assignment[var]
 
-    # --------- Public API ---------
+                if val is None:
+                    clause_has_unassigned = True
+                else:
+                    # literal is true under assignment?
+                    if (lit > 0 and val) or (lit < 0 and not val):
+                        clause_satisfied = True
+                        break
+
+            if clause_satisfied or not clause_has_unassigned:
+                # Skip clauses that are already satisfied or already impossible
+                continue
+
+            # Clause is unsatisfied but has at least one unassigned literal.
+            weight = 1.0 / (2 ** len(clause))
+
+            # Add weight to all unassigned literals in this clause
+            for lit in clause:
+                var = abs(lit)
+                val = assignment[var]
+                if val is None:
+                    scores[lit] += weight
+
+        if not scores:
+            return None
+
+        # Pick literal with maximum DSJ score
+        best_lit, _ = max(scores.items(), key=lambda kv: kv[1])
+        return best_lit
+
+    # ---------- public solve() with instrumentation ----------
 
     def solve(self):
         """
@@ -185,67 +303,56 @@ class DPLL:
                 - None if UNSAT.
 
         Side effects:
-            - Updates self.split_count with the number of branching decisions.
-            - Updates self.solve_time with elapsed wall-clock time (seconds).
+            - self.split_count: # of splitting rule applications
+            - self.solve_time: elapsed seconds
         """
-        # reset instrumentation for this run
+        # reset per-run state
         self.split_count = 0
         self.solve_time = 0.0
+        self.last_propagated = 0
+        self.trail.clear()
+        self.assignment = [None] * (self.num_vars + 1)
 
         start = time.perf_counter()
 
-        # initial propagation
         if not self.propagate():
             self.solve_time = time.perf_counter() - start
-            return None  # immediate conflict
+            return None
 
         model = self._solve_rec()
 
         self.solve_time = time.perf_counter() - start
         return model
 
-    # --------- Core recursive DPLL ---------
-
     def _solve_rec(self):
-        """
-        Recursive DPLL on current state.
-
-        Returns:
-            dict[int, bool] | None:
-                - model if SAT
-                - None if UNSAT
-        """
         status = self.check_status()
         if status is True:
-            # build and return model
             return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
         elif status is False:
             return None
 
-        # Need to branch
-        var = self.choose_var()
-        if var is None:
-            # No variable left unassigned; treat as SAT with current assignment
+        # --- DSJ branching: choose best literal ---
+        branch_lit = self.choose_branch_literal()
+        if branch_lit is None:
+            # No unassigned literals but not caught by check_status yet:
             return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
 
-        # --- splitting rule applied here ---
-        self.split_count += 1
+        self.split_count += 1  # one splitting rule application here
 
-        # Try var = True
+        # First branch: assign chosen literal to True
         mark = len(self.trail)
-        if self.assign_literal(+var) and self.propagate():
+        if self.assign_literal(branch_lit) and self.propagate():
             model = self._solve_rec()
             if model is not None:
                 return model
         self.undo_to(mark)
 
-        # Try var = False
+        # Second branch: assign its negation
         mark = len(self.trail)
-        if self.assign_literal(-var) and self.propagate():
+        if self.assign_literal(-branch_lit) and self.propagate():
             model = self._solve_rec()
             if model is not None:
                 return model
         self.undo_to(mark)
 
-        # Both branches UNSAT
         return None
