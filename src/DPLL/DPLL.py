@@ -51,6 +51,17 @@ class DPLL:
             for lit in clause:
                 self.var_freq[abs(lit)] += 1
 
+
+                # cheap branching: static literal frequency
+        self.lit_count = defaultdict(int)   # lit -> count
+        self._all_lits = []                 # cache unique literals for iteration
+        for clause in self.clauses:
+            for lit in clause:
+                self.lit_count[lit] += 1
+
+        self._all_lits = list(self.lit_count.keys())
+
+
         # watched-literal structures
         self.watch_pos: list[tuple[int, int]] = []
         self.watchlist: dict[int, list[int]] = defaultdict(list)
@@ -62,8 +73,6 @@ class DPLL:
         # instrumentation
         self.split_count = 0
         self.solve_time = 0.0
-
-    # ---------- watched-literal initialization ----------
 
     def _init_watches(self) -> None:
         """
@@ -83,8 +92,6 @@ class DPLL:
                 lit1, lit2 = clause[0], clause[1]
                 self.watchlist[lit1].append(ci)
                 self.watchlist[lit2].append(ci)
-
-    # ---------- assignment & backtracking ----------
 
     def assign_literal(self, lit: int) -> bool:
         """
@@ -112,8 +119,6 @@ class DPLL:
 
         if self.last_propagated > trail_len:
             self.last_propagated = trail_len
-
-    # ---------- watched-literal propagation ----------
 
     def propagate(self) -> bool:
         """
@@ -204,8 +209,6 @@ class DPLL:
 
         return True
 
-    # ---------- status & branching ----------
-
     def check_status(self):
         """
         Check if the formula is SAT, UNSAT, or unknown.
@@ -242,56 +245,26 @@ class DPLL:
 
     def choose_branch_literal(self) -> int | None:
         """
-        DSJ heuristic:
-        For each *literal* ℓ, compute:
-
-            score(ℓ) = sum_{ℓ in C, C unsatisfied} 1 / 2^{|C|}
-
-        over clauses C that are not yet satisfied and where ℓ's variable is unassigned.
-        Return the literal with the highest score, or None if no candidate.
+        Cheap branching heuristic:
+        pick the literal with the largest *static* occurrence count
+        among variables that are still unassigned.
         """
-        scores = defaultdict(float)
         assignment = self.assignment
+        lit_count = self.lit_count
 
-        for clause in self.clauses:
-            # Check if clause is already satisfied or completely dead
-            clause_satisfied = False
-            clause_has_unassigned = False
+        best_lit = None
+        best_score = -1
 
-            for lit in clause:
-                var = abs(lit)
-                val = assignment[var]
-
-                if val is None:
-                    clause_has_unassigned = True
-                else:
-                    # literal is true under assignment?
-                    if (lit > 0 and val) or (lit < 0 and not val):
-                        clause_satisfied = True
-                        break
-
-            if clause_satisfied or not clause_has_unassigned:
-                # Skip clauses that are already satisfied or already impossible
+        for lit in self._all_lits:
+            var = abs(lit)
+            if assignment[var] is not None:
                 continue
+            score = lit_count[lit]
+            if score > best_score:
+                best_score = score
+                best_lit = lit
 
-            # Clause is unsatisfied but has at least one unassigned literal.
-            weight = 1.0 / (2 ** len(clause))
-
-            # Add weight to all unassigned literals in this clause
-            for lit in clause:
-                var = abs(lit)
-                val = assignment[var]
-                if val is None:
-                    scores[lit] += weight
-
-        if not scores:
-            return None
-
-        # Pick literal with maximum DSJ score
-        best_lit, _ = max(scores.items(), key=lambda kv: kv[1])
         return best_lit
-
-    # ---------- public solve() with instrumentation ----------
 
     def solve(self):
         """
@@ -307,6 +280,16 @@ class DPLL:
             - self.solve_time: elapsed seconds
         """
         # reset per-run state
+        return self.solve_iterative()
+
+    def solve_iterative(self):
+        """
+        Iterative DPLL search using an explicit stack instead of recursion.
+
+        Returns:
+            dict[int, bool] | None
+        """
+        # reset per-run state
         self.split_count = 0
         self.solve_time = 0.0
         self.last_propagated = 0
@@ -315,44 +298,52 @@ class DPLL:
 
         start = time.perf_counter()
 
-        if not self.propagate():
-            self.solve_time = time.perf_counter() - start
-            return None
+        # Each stack frame: (branch_lit, trail_mark, flipped)
+        # flipped=False means we have not tried the opposite branch yet.
+        stack: list[tuple[int, int, bool]] = []
 
-        model = self._solve_rec()
+        while True:
+            # propagate until fixpoint / conflict
+            if not self.propagate():
+                # conflict: backtrack
+                while stack:
+                    branch_lit, mark, flipped = stack.pop()
+                    self.undo_to(mark)
 
-        self.solve_time = time.perf_counter() - start
-        return model
+                    if not flipped:
+                        # try opposite branch now
+                        stack.append((branch_lit, mark, True))
+                        if self.assign_literal(-branch_lit):
+                            break
+                        # if immediate contradiction, keep backtracking
+                else:
+                    # no more stack => UNSAT
+                    self.solve_time = time.perf_counter() - start
+                    return None
 
-    def _solve_rec(self):
-        status = self.check_status()
-        if status is True:
-            return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
-        elif status is False:
-            return None
+                # continue main loop after assigning opposite branch
+                continue
 
-        # --- DSJ branching: choose best literal ---
-        branch_lit = self.choose_branch_literal()
-        if branch_lit is None:
-            # No unassigned literals but not caught by check_status yet:
-            return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
+            status = self.check_status()
+            if status is True:
+                self.solve_time = time.perf_counter() - start
+                return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
+            if status is False:
+                # should usually be caught by propagate(), but handle defensively
+                continue
 
-        self.split_count += 1  # one splitting rule application here
+            # choose branch literal
+            branch_lit = self.choose_branch_literal()
+            if branch_lit is None:
+                # no unassigned vars left; treat as SAT
+                self.solve_time = time.perf_counter() - start
+                return {v: bool(self.assignment[v]) for v in range(1, self.num_vars + 1)}
 
-        # First branch: assign chosen literal to True
-        mark = len(self.trail)
-        if self.assign_literal(branch_lit) and self.propagate():
-            model = self._solve_rec()
-            if model is not None:
-                return model
-        self.undo_to(mark)
+            self.split_count += 1
+            mark = len(self.trail)
+            stack.append((branch_lit, mark, False))
 
-        # Second branch: assign its negation
-        mark = len(self.trail)
-        if self.assign_literal(-branch_lit) and self.propagate():
-            model = self._solve_rec()
-            if model is not None:
-                return model
-        self.undo_to(mark)
-
-        return None
+            # try first branch (lit = True)
+            if not self.assign_literal(branch_lit):
+                # immediate conflict -> loop will backtrack on next propagate()
+                continue
